@@ -186,7 +186,8 @@ class MainActivity : ComponentActivity() {
 enum class ActivePopup {
     EXPOSURE,
     GAIN,
-    FOCUS
+    FOCUS,
+    RESOLUTION
 }
 
 private fun updateTextureTransform(
@@ -669,27 +670,23 @@ fun CameraAppScreen(
                     )
                 }
 
-                // Интерактивная плашка переключения разрешения 640×480 ↔ 1280×960
+                // Интерактивная плашка выбора разрешения кадра
+                val isResOpen = activePopup == ActivePopup.RESOLUTION
                 val is1280 = streamTargetWidth == 1280 && streamTargetHeight == 960
                 Surface(
                     shape = RoundedCornerShape(6.dp),
-                    color = if (is1280) Color(0xFF0C2419) else Color(0xFF091410),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, if (is1280) Color(0xFF00F076) else Color(0xFF173327)),
+                    color = if (isResOpen) Color(0xFF143828) else if (is1280) Color(0xFF0C2419) else Color(0xFF091410),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (isResOpen || is1280) Color(0xFF00F076) else Color(0xFF173327)),
                     modifier = Modifier.clickable {
-                        val newW = if (is1280) 640 else 1280
-                        val newH = if (is1280) 480 else 960
-                        streamTargetWidth = newW
-                        streamTargetHeight = newH
-                        session.setStreamResolution(newW, newH)
-                        gvcpServer.updateResolution(newW, newH)
+                        activePopup = if (isResOpen) null else ActivePopup.RESOLUTION
                     }
                 ) {
                     Text(
-                        if (isLandscape) "$streamTargetWidth×$streamTargetHeight Mono8" else "$streamTargetWidth×$streamTargetHeight",
+                        if (isLandscape) "$streamTargetWidth×$streamTargetHeight Mono8 ▾" else "$streamTargetWidth×$streamTargetHeight ▾",
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
-                        fontWeight = if (is1280) FontWeight.Bold else FontWeight.Normal,
-                        color = if (is1280) Color(0xFF00F076) else Color(0xFF7DA596),
+                        fontWeight = if (isResOpen || is1280) FontWeight.Bold else FontWeight.Normal,
+                        color = if (isResOpen || is1280) Color(0xFF00F076) else Color(0xFF7DA596),
                         maxLines = 1,
                         modifier = Modifier.padding(horizontal = if (isLandscape) 8.dp else 5.dp, vertical = 3.dp)
                     )
@@ -1378,6 +1375,74 @@ fun CameraAppScreen(
                                                     color = if (isSel) Color.Black else Color(0xFF7DA596),
                                                     textAlign = TextAlign.Center,
                                                     modifier = Modifier.padding(vertical = 4.dp)
+                                                )
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                            ActivePopup.RESOLUTION -> {
+                                Row(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    horizontalArrangement = Arrangement.SpaceBetween,
+                                    verticalAlignment = Alignment.CenterVertically
+                                ) {
+                                    Text("Разрешение потока MVS", fontSize = 11.sp, fontWeight = FontWeight.Bold, color = Color(0xFFE1E7E4))
+                                    Text(
+                                        "$streamTargetWidth×$streamTargetHeight",
+                                        fontSize = 12.sp,
+                                        fontFamily = FontFamily.Monospace,
+                                        fontWeight = FontWeight.Bold,
+                                        color = Color(0xFF00F076)
+                                    )
+                                }
+
+                                Spacer(Modifier.height(8.dp))
+
+                                val resolutionList = listOf(
+                                    Triple(640, 480, "VGA · 30 FPS (~74 Мбит/с)"),
+                                    Triple(800, 600, "SVGA · 30 FPS (~115 Мбит/с)"),
+                                    Triple(960, 720, "HD · 25–30 FPS (~166 Мбит/с)"),
+                                    Triple(1024, 768, "XGA · 25–30 FPS (~189 Мбит/с)"),
+                                    Triple(1280, 960, "1:1 Сенсор · 20–30 FPS (~295 Мбит/с)")
+                                )
+
+                                Column(
+                                    modifier = Modifier.fillMaxWidth(),
+                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                ) {
+                                    resolutionList.forEach { (w, h, desc) ->
+                                        val isSel = streamTargetWidth == w && streamTargetHeight == h
+                                        Surface(
+                                            shape = RoundedCornerShape(6.dp),
+                                            color = if (isSel) Color(0xFF00F076) else Color(0xFF0C1814),
+                                            border = if (!isSel) androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF173327)) else null,
+                                            modifier = Modifier
+                                                .fillMaxWidth()
+                                                .clickable {
+                                                    streamTargetWidth = w
+                                                    streamTargetHeight = h
+                                                    session.setStreamResolution(w, h)
+                                                    gvcpServer.updateResolution(w, h)
+                                                    activePopup = null
+                                                }
+                                        ) {
+                                            Row(
+                                                modifier = Modifier.padding(horizontal = 10.dp, vertical = 6.dp),
+                                                horizontalArrangement = Arrangement.SpaceBetween,
+                                                verticalAlignment = Alignment.CenterVertically
+                                            ) {
+                                                Text(
+                                                    "${w}×${h}",
+                                                    fontSize = 11.sp,
+                                                    fontFamily = FontFamily.Monospace,
+                                                    fontWeight = FontWeight.Bold,
+                                                    color = if (isSel) Color.Black else Color(0xFFE1E7E4)
+                                                )
+                                                Text(
+                                                    desc,
+                                                    fontSize = 9.sp,
+                                                    color = if (isSel) Color(0xFF071B12) else Color(0xFF7DA596)
                                                 )
                                             }
                                         }
