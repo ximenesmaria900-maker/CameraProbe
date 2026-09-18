@@ -353,8 +353,8 @@ class Camera2Session(private val context: Context) {
                     val monoBytes = reusableMonoBytes!!
                     yBuffer.rewind()
 
-                    val isRefLandscape = (streamRotationDegrees == 90f || streamRotationDegrees == -270f)
-                    val isInvertedLandscape = (streamRotationDegrees == -90f || streamRotationDegrees == 270f)
+                    val isRefLandscape = (streamRotationDegrees == -90f || streamRotationDegrees == 270f)
+                    val isInvertedLandscape = (streamRotationDegrees == 90f || streamRotationDegrees == -270f)
                     val isPortrait = (streamRotationDegrees == 0f)
                     val isInvertedPortrait = (streamRotationDegrees == 180f || streamRotationDegrees == -180f)
 
@@ -428,67 +428,77 @@ class Camera2Session(private val context: Context) {
                         }
                     } else {
                         // Портретные режимы (вертикальное удержание телефона):
-                        // w = 1280 (вдоль длинной оси телефона), h = 960 (вдоль короткой оси).
-                        // MVS ожидает targetW = 640 (горизонталь кадра) x targetH = 480 (вертикаль кадра).
-                        val maxStartX = (w - targetH).coerceAtLeast(0) // 1280 - 480 = 800
-                        val maxStartY = (h - targetW).coerceAtLeast(0) // 960 - 640 = 320
-                        val centerStartX = maxStartX / 2 // 400
-                        val centerStartY = maxStartY / 2 // 160
+                        // Экран и реальный мир в портрете: ширина = 960 (горизонталь), высота = 1280 (вертикаль).
+                        // MVS окно: targetW = 640 (горизонталь), targetH = 480 (вертикаль).
+                        // Преобразование координат сенсора (1280x960, orientation=90 CW):
+                        // sensorR = (h - 1) - worldX
+                        // sensorC = worldY
+                        val maxWorldX = (h - targetW).coerceAtLeast(0) // 960 - 640 = 320
+                        val maxWorldY = (w - targetH).coerceAtLeast(0) // 1280 - 480 = 800
+                        val centerWorldX = maxWorldX / 2 // 160
+                        val centerWorldY = maxWorldY / 2 // 400
 
                         val roiStartX = if (isInvertedPortrait) {
-                            (centerStartX + (roiNormalizedY * (maxStartX / 2f)).toInt()).coerceIn(0, maxStartX)
+                            (centerWorldX - (roiNormalizedX * (maxWorldX / 2f)).toInt()).coerceIn(0, maxWorldX)
                         } else {
-                            (centerStartX - (roiNormalizedY * (maxStartX / 2f)).toInt()).coerceIn(0, maxStartX)
+                            (centerWorldX + (roiNormalizedX * (maxWorldX / 2f)).toInt()).coerceIn(0, maxWorldX)
                         }
                         val roiStartY = if (isInvertedPortrait) {
-                            (centerStartY - (roiNormalizedX * (maxStartY / 2f)).toInt()).coerceIn(0, maxStartY)
+                            (centerWorldY - (roiNormalizedY * (maxWorldY / 2f)).toInt()).coerceIn(0, maxWorldY)
                         } else {
-                            (centerStartY + (roiNormalizedX * (maxStartY / 2f)).toInt()).coerceIn(0, maxStartY)
+                            (centerWorldY + (roiNormalizedY * (maxWorldY / 2f)).toInt()).coerceIn(0, maxWorldY)
                         }
 
                         if (cropMode == SensorCropMode.SENSOR_ROI && h >= targetW && w >= targetH) {
                             if (isPortrait) {
-                                // Прямой вертикальный режим (0°):
-                                // Верх телефона = высокий X, низ = низкий X.
-                                // Лево = низкий Y, право = высокий Y.
+                                // Прямой вертикальный режим (0° ВЕРТ)
                                 for (r in 0 until targetH) {
-                                    val xSrc = roiStartX + (targetH - 1 - r)
+                                    val worldY = roiStartY + r
                                     val dstRowOffset = r * targetW
                                     for (c in 0 until targetW) {
-                                        val ySrc = roiStartY + c
-                                        monoBytes[dstRowOffset + c] = yBuffer.get(ySrc * rowStride + xSrc * pixelStride)
+                                        val worldX = roiStartX + c
+                                        val sensorR = (h - 1) - worldX
+                                        val sensorC = worldY
+                                        monoBytes[dstRowOffset + c] = yBuffer.get(sensorR * rowStride + sensorC * pixelStride)
                                     }
                                 }
                             } else {
                                 // Перевёрнутый вертикальный режим (180°)
                                 for (r in 0 until targetH) {
-                                    val xSrc = roiStartX + r
+                                    val worldY = (w - 1) - (roiStartY + r)
                                     val dstRowOffset = r * targetW
                                     for (c in 0 until targetW) {
-                                        val ySrc = roiStartY + (targetW - 1 - c)
-                                        monoBytes[dstRowOffset + c] = yBuffer.get(ySrc * rowStride + xSrc * pixelStride)
+                                        val worldX = (h - 1) - (roiStartX + c)
+                                        val sensorR = (h - 1) - worldX
+                                        val sensorC = worldY
+                                        monoBytes[dstRowOffset + c] = yBuffer.get(sensorR * rowStride + sensorC * pixelStride)
                                     }
                                 }
                             }
                         } else {
-                            val scaleX = w.toFloat() / targetH // 1280 / 480
-                            val scaleY = h.toFloat() / targetW // 960 / 640
+                            // FULL FOV в портрете (весь мир 960x1280 масштабируется в 640x480)
+                            val scaleX = h.toFloat() / targetW // 960 / 640 = 1.5
+                            val scaleY = w.toFloat() / targetH // 1280 / 480 = 2.666
                             if (isPortrait) {
                                 for (r in 0 until targetH) {
-                                    val xSrc = (((targetH - 1 - r) * scaleX).toInt()).coerceIn(0, w - 1)
+                                    val worldY = ((r * scaleY).toInt()).coerceIn(0, w - 1)
                                     val dstRowOffset = r * targetW
                                     for (c in 0 until targetW) {
-                                        val ySrc = ((c * scaleY).toInt()).coerceIn(0, h - 1)
-                                        monoBytes[dstRowOffset + c] = yBuffer.get(ySrc * rowStride + xSrc * pixelStride)
+                                        val worldX = ((c * scaleX).toInt()).coerceIn(0, h - 1)
+                                        val sensorR = (h - 1) - worldX
+                                        val sensorC = worldY
+                                        monoBytes[dstRowOffset + c] = yBuffer.get(sensorR * rowStride + sensorC * pixelStride)
                                     }
                                 }
                             } else {
                                 for (r in 0 until targetH) {
-                                    val xSrc = ((r * scaleX).toInt()).coerceIn(0, w - 1)
+                                    val worldY = (((targetH - 1 - r) * scaleY).toInt()).coerceIn(0, w - 1)
                                     val dstRowOffset = r * targetW
                                     for (c in 0 until targetW) {
-                                        val ySrc = (((targetW - 1 - c) * scaleY).toInt()).coerceIn(0, h - 1)
-                                        monoBytes[dstRowOffset + c] = yBuffer.get(ySrc * rowStride + xSrc * pixelStride)
+                                        val worldX = (((targetW - 1 - c) * scaleX).toInt()).coerceIn(0, h - 1)
+                                        val sensorR = (h - 1) - worldX
+                                        val sensorC = worldY
+                                        monoBytes[dstRowOffset + c] = yBuffer.get(sensorR * rowStride + sensorC * pixelStride)
                                     }
                                 }
                             }

@@ -206,13 +206,14 @@ private fun updateTextureTransform(
     // Итоговые углы: -90f→270°, 0f→0°, 90f→90°, 180f→180°
     when (rotationDeg) {
         0f -> {
-            // Портрет (телефон прямо) — без дополнительного поворота.
-            // Буфер после внутренней GL-компенсации уже соответствует 3:4.
-            val bufferRect = RectF(0f, 0f, bufferWidth, bufferHeight)
+            // Портрет: сенсор 1280x960 с sensorOrientation=90 поворачиваем на 90° по часовой стрелке,
+            // буфер становится 960 (ширина) x 1280 (высота) — естественный 3:4 портрет
+            val bufferRect = RectF(0f, 0f, bufferHeight, bufferWidth)
             bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
             matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-            val scale = kotlin.math.max(viewWidth / bufferWidth, viewHeight / bufferHeight)
+            val scale = kotlin.math.max(viewWidth / bufferHeight, viewHeight / bufferWidth)
             matrix.postScale(scale, scale, centerX, centerY)
+            matrix.postRotate(90f, centerX, centerY)
         }
         -90f -> {
             // Телефон на левом боку (стенд, ROTATION_270) — компенсация +270°
@@ -233,13 +234,13 @@ private fun updateTextureTransform(
             matrix.postRotate(90f, centerX, centerY)
         }
         180f -> {
-            // Перевёрнутый портрет — компенсация 180°
-            val bufferRect = RectF(0f, 0f, bufferWidth, bufferHeight)
+            // Перевёрнутый портрет — компенсация 270°
+            val bufferRect = RectF(0f, 0f, bufferHeight, bufferWidth)
             bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
             matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-            val scale = kotlin.math.max(viewWidth / bufferWidth, viewHeight / bufferHeight)
+            val scale = kotlin.math.max(viewWidth / bufferHeight, viewHeight / bufferWidth)
             matrix.postScale(scale, scale, centerX, centerY)
-            matrix.postRotate(180f, centerX, centerY)
+            matrix.postRotate(270f, centerX, centerY)
         }
         else -> {
             val scale = kotlin.math.max(viewWidth / bufferWidth, viewHeight / bufferHeight)
@@ -428,10 +429,15 @@ fun CameraAppScreen(
 
         // --- 2. Центр: Полноразмерное живое превью с рамкой ROI и лазерным сечением ---
         Box(
-            modifier = Modifier.fillMaxSize(),
-            contentAlignment = if (isLandscape) Alignment.Center else Alignment.TopCenter
+            modifier = Modifier
+                .fillMaxSize()
+                .padding(
+                    top = if (isLandscape) 0.dp else 44.dp,
+                    bottom = if (isLandscape) 0.dp else 184.dp
+                ),
+            contentAlignment = Alignment.Center
         ) {
-            val isRotated90 = (kotlin.math.abs(rotationAngle) == 90f || kotlin.math.abs(rotationAngle) == 270f)
+            val isPortraitMode = !isLandscape
 
             BoxWithConstraints(
                 modifier = (if (isLandscape) {
@@ -440,9 +446,9 @@ fun CameraAppScreen(
                         .aspectRatio(4f / 3f, matchHeightConstraintsFirst = true)
                 } else {
                     Modifier
-                        .padding(top = 48.dp)
-                        .fillMaxWidth(0.96f)
-                        .aspectRatio(4f / 3f, matchHeightConstraintsFirst = false)
+                        .fillMaxWidth(0.98f)
+                        .fillMaxHeight()
+                        .aspectRatio(3f / 4f, matchHeightConstraintsFirst = true)
                 })
                     .background(Color(0xFF060D0A))
                     .pointerInput(Unit) {
@@ -458,16 +464,18 @@ fun CameraAppScreen(
                             }
                         )
                     }
-                    .pointerInput(cropMode, isRotated90) {
+                    .pointerInput(cropMode, isPortraitMode) {
                         if (cropMode == Camera2Session.SensorCropMode.SENSOR_ROI) {
                             detectDragGestures { change, dragAmount ->
                                 change.consume()
                                 activePopup = null
                                 val boxWpx = size.width.toFloat()
                                 val boxHpx = size.height.toFloat()
-                                val scale = kotlin.math.max(boxWpx / 1280f, boxHpx / 960f)
-                                val maxTravelX = ((1280f - 640f) * scale).coerceAtLeast(1f)
-                                val maxTravelY = ((960f - 480f) * scale).coerceAtLeast(1f)
+                                val refW = if (isPortraitMode) 960f else 1280f
+                                val refH = if (isPortraitMode) 1280f else 960f
+                                val scale = kotlin.math.max(boxWpx / refW, boxHpx / refH)
+                                val maxTravelX = ((refW - 640f) * scale).coerceAtLeast(1f)
+                                val maxTravelY = ((refH - 480f) * scale).coerceAtLeast(1f)
                                 val deltaNormX = dragAmount.x / (maxTravelX / 2f)
                                 val deltaNormY = dragAmount.y / (maxTravelY / 2f)
                                 roiNormX = (roiNormX + deltaNormX).coerceIn(-1.0f, 1.0f)
@@ -483,11 +491,15 @@ fun CameraAppScreen(
                 val boxWpx = with(density) { boxW.toPx() }
                 val boxHpx = with(density) { boxH.toPx() }
 
-                val scale = kotlin.math.max(boxWpx / 1280f, boxHpx / 960f)
+                val isPortraitMode = !isLandscape
+                val refW = if (isPortraitMode) 960f else 1280f
+                val refH = if (isPortraitMode) 1280f else 960f
+
+                val scale = kotlin.math.max(boxWpx / refW, boxHpx / refH)
                 val roiWpx = 640f * scale
                 val roiHpx = 480f * scale
-                val maxTravelX = ((1280f - 640f) * scale).coerceAtLeast(0f)
-                val maxTravelY = ((960f - 480f) * scale).coerceAtLeast(0f)
+                val maxTravelX = ((refW - 640f) * scale).coerceAtLeast(0f)
+                val maxTravelY = ((refH - 480f) * scale).coerceAtLeast(0f)
                 val roiLeftPx = (boxWpx / 2f) - (roiWpx / 2f) + (roiNormX * (maxTravelX / 2f))
                 val roiTopPx = (boxHpx / 2f) - (roiHpx / 2f) + (roiNormY * (maxTravelY / 2f))
 
