@@ -128,8 +128,11 @@ class MainActivity : ComponentActivity() {
         // Связываем события стриминга GigE Vision напрямую с Camera2
         gvcpServer.onStreamStart = {
             android.util.Log.i("MainActivity", "🟢 onStreamStart: включение передачи кадров в GVSP")
-            cameraSession.setStreamingActive(true) { frameBytes, w, h ->
-                gvcpServer.streamer.sendFrame(frameBytes, w, h)
+            val w = gvcpServer.getStreamWidth()
+            val h = gvcpServer.getStreamHeight()
+            cameraSession.setStreamResolution(w, h)
+            cameraSession.setStreamingActive(true) { frameBytes, frameW, frameH ->
+                gvcpServer.streamer.sendFrame(frameBytes, frameW, frameH)
             }
         }
         gvcpServer.onStreamStop = {
@@ -286,6 +289,8 @@ fun CameraAppScreen(
     // Камеры, масштаб, режим сенсора
     var availableCameras by remember { mutableStateOf<List<CameraDeviceInfo>>(emptyList()) }
     var selectedCameraId by remember { mutableStateOf(session.currentCameraId) }
+    var streamTargetWidth by remember { mutableStateOf(gvcpServer.getStreamWidth()) }
+    var streamTargetHeight by remember { mutableStateOf(gvcpServer.getStreamHeight()) }
     var selectedFps by remember { mutableStateOf(30) }
     var currentZoom by remember { mutableStateOf(1.0f) }
     var cropMode by remember { mutableStateOf(Camera2Session.SensorCropMode.SENSOR_ROI) }
@@ -378,6 +383,11 @@ fun CameraAppScreen(
                 session.setGain(mvsIso)
             }
         }
+        gvcpServer.onResolutionChangedByMvs = { w, h ->
+            streamTargetWidth = w
+            streamTargetHeight = h
+            session.setStreamResolution(w, h)
+        }
     }
 
     // Инициализация сессии камеры
@@ -447,8 +457,7 @@ fun CameraAppScreen(
                 } else {
                     Modifier
                         .fillMaxWidth(0.98f)
-                        .fillMaxHeight()
-                        .aspectRatio(3f / 4f, matchHeightConstraintsFirst = true)
+                        .aspectRatio(3f / 4f, matchHeightConstraintsFirst = false)
                 })
                     .background(Color(0xFF060D0A))
                     .pointerInput(Unit) {
@@ -464,7 +473,7 @@ fun CameraAppScreen(
                             }
                         )
                     }
-                    .pointerInput(cropMode, isPortraitMode) {
+                    .pointerInput(cropMode, isPortraitMode, streamTargetWidth, streamTargetHeight) {
                         if (cropMode == Camera2Session.SensorCropMode.SENSOR_ROI) {
                             detectDragGestures { change, dragAmount ->
                                 change.consume()
@@ -474,8 +483,11 @@ fun CameraAppScreen(
                                 val refW = if (isPortraitMode) 960f else 1280f
                                 val refH = if (isPortraitMode) 1280f else 960f
                                 val scale = kotlin.math.max(boxWpx / refW, boxHpx / refH)
-                                val maxTravelX = ((refW - 640f) * scale).coerceAtLeast(1f)
-                                val maxTravelY = ((refH - 480f) * scale).coerceAtLeast(1f)
+                                val is1280 = streamTargetWidth == 1280 && streamTargetHeight == 960
+                                val targetW = if (is1280) refW else streamTargetWidth.toFloat()
+                                val targetH = if (is1280) refH else streamTargetHeight.toFloat()
+                                val maxTravelX = ((refW - targetW) * scale).coerceAtLeast(1f)
+                                val maxTravelY = ((refH - targetH) * scale).coerceAtLeast(1f)
                                 val deltaNormX = dragAmount.x / (maxTravelX / 2f)
                                 val deltaNormY = dragAmount.y / (maxTravelY / 2f)
                                 roiNormX = (roiNormX + deltaNormX).coerceIn(-1.0f, 1.0f)
@@ -496,10 +508,13 @@ fun CameraAppScreen(
                 val refH = if (isPortraitMode) 1280f else 960f
 
                 val scale = kotlin.math.max(boxWpx / refW, boxHpx / refH)
-                val roiWpx = 640f * scale
-                val roiHpx = 480f * scale
-                val maxTravelX = ((refW - 640f) * scale).coerceAtLeast(0f)
-                val maxTravelY = ((refH - 480f) * scale).coerceAtLeast(0f)
+                val is1280 = streamTargetWidth == 1280 && streamTargetHeight == 960
+                val targetW = if (is1280) refW else streamTargetWidth.toFloat()
+                val targetH = if (is1280) refH else streamTargetHeight.toFloat()
+                val roiWpx = targetW * scale
+                val roiHpx = targetH * scale
+                val maxTravelX = ((refW - targetW) * scale).coerceAtLeast(0f)
+                val maxTravelY = ((refH - targetH) * scale).coerceAtLeast(0f)
                 val roiLeftPx = (boxWpx / 2f) - (roiWpx / 2f) + (roiNormX * (maxTravelX / 2f))
                 val roiTopPx = (boxHpx / 2f) - (roiHpx / 2f) + (roiNormY * (maxTravelY / 2f))
 
@@ -533,6 +548,13 @@ fun CameraAppScreen(
                     modifier = Modifier.fillMaxSize()
                 )
 
+                val inset2px = with(density) { 2.dp.toPx() }
+                val inset4px = with(density) { 4.dp.toPx() }
+                val effectiveRoiLeftPx = if (is1280) inset2px else roiLeftPx
+                val effectiveRoiTopPx = if (is1280) inset2px else roiTopPx
+                val effectiveRoiWpx = if (is1280) (boxWpx - inset4px).coerceAtLeast(10f) else roiWpx
+                val effectiveRoiHpx = if (is1280) (boxHpx - inset4px).coerceAtLeast(10f) else roiHpx
+
                 // Оверлей: Красная лазерная линия + Жёлтая рамка кадрирования ROI
                 Canvas(modifier = Modifier.fillMaxSize()) {
                     if (cropMode == Camera2Session.SensorCropMode.SENSOR_ROI) {
@@ -541,8 +563,8 @@ fun CameraAppScreen(
                         // Жёлтый прямоугольник
                         drawRoundRect(
                             color = yellowColor,
-                            topLeft = Offset(roiLeftPx, roiTopPx),
-                            size = Size(roiWpx, roiHpx),
+                            topLeft = Offset(effectiveRoiLeftPx, effectiveRoiTopPx),
+                            size = Size(effectiveRoiWpx, effectiveRoiHpx),
                             cornerRadius = CornerRadius(6.dp.toPx()),
                             style = Stroke(width = 1.5.dp.toPx())
                         )
@@ -550,10 +572,10 @@ fun CameraAppScreen(
                         // 4 угловых круговых маркера
                         val handleRadius = 5.dp.toPx()
                         listOf(
-                            Offset(roiLeftPx, roiTopPx),
-                            Offset(roiLeftPx + roiWpx, roiTopPx),
-                            Offset(roiLeftPx, roiTopPx + roiHpx),
-                            Offset(roiLeftPx + roiWpx, roiTopPx + roiHpx)
+                            Offset(effectiveRoiLeftPx, effectiveRoiTopPx),
+                            Offset(effectiveRoiLeftPx + effectiveRoiWpx, effectiveRoiTopPx),
+                            Offset(effectiveRoiLeftPx, effectiveRoiTopPx + effectiveRoiHpx),
+                            Offset(effectiveRoiLeftPx + effectiveRoiWpx, effectiveRoiTopPx + effectiveRoiHpx)
                         ).forEach { pt ->
                             drawCircle(color = Color(0xFF050B0A), radius = handleRadius, center = pt)
                             drawCircle(color = yellowColor, radius = handleRadius, center = pt, style = Stroke(width = 2.dp.toPx()))
@@ -561,10 +583,10 @@ fun CameraAppScreen(
                     }
                 }
 
-                // Жёлтый бейдж "ROI 640 × 480 · 1:1" в верхнем левом углу рамки ROI
-                if (cropMode == Camera2Session.SensorCropMode.SENSOR_ROI) {
-                    val badgeOffsetX = with(density) { roiLeftPx.toDp() } + 4.dp
-                    val badgeOffsetY = with(density) { roiTopPx.toDp() } + 4.dp
+                // Жёлтый бейдж "ROI 640 × 480 · 1:1" в верхнем левом углу рамки ROI (при кропе 640x480)
+                if (cropMode == Camera2Session.SensorCropMode.SENSOR_ROI && !is1280) {
+                    val badgeOffsetX = (with(density) { effectiveRoiLeftPx.toDp() } + 6.dp).coerceIn(6.dp, (boxW - 170.dp).coerceAtLeast(6.dp))
+                    val badgeOffsetY = (with(density) { effectiveRoiTopPx.toDp() } + 6.dp).coerceIn(6.dp, (boxH - 30.dp).coerceAtLeast(6.dp))
                     Surface(
                         shape = RoundedCornerShape(4.dp),
                         color = Color(0xFFFCD34D),
@@ -573,7 +595,7 @@ fun CameraAppScreen(
                             .offset(x = badgeOffsetX, y = badgeOffsetY)
                     ) {
                         Text(
-                            text = "ROI 640 × 480 · 1:1",
+                            text = "ROI $streamTargetWidth × $streamTargetHeight · 1:1",
                             fontSize = 8.sp,
                             fontWeight = FontWeight.Bold,
                             color = Color.Black,
@@ -647,16 +669,27 @@ fun CameraAppScreen(
                     )
                 }
 
+                // Интерактивная плашка переключения разрешения 640×480 ↔ 1280×960
+                val is1280 = streamTargetWidth == 1280 && streamTargetHeight == 960
                 Surface(
                     shape = RoundedCornerShape(6.dp),
-                    color = Color(0xFF091410),
-                    border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF173327))
+                    color = if (is1280) Color(0xFF0C2419) else Color(0xFF091410),
+                    border = androidx.compose.foundation.BorderStroke(1.dp, if (is1280) Color(0xFF00F076) else Color(0xFF173327)),
+                    modifier = Modifier.clickable {
+                        val newW = if (is1280) 640 else 1280
+                        val newH = if (is1280) 480 else 960
+                        streamTargetWidth = newW
+                        streamTargetHeight = newH
+                        session.setStreamResolution(newW, newH)
+                        gvcpServer.updateResolution(newW, newH)
+                    }
                 ) {
                     Text(
-                        if (isLandscape) "640×480 Mono8" else "640×480",
+                        if (isLandscape) "$streamTargetWidth×$streamTargetHeight Mono8" else "$streamTargetWidth×$streamTargetHeight",
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
-                        color = Color(0xFF7DA596),
+                        fontWeight = if (is1280) FontWeight.Bold else FontWeight.Normal,
+                        color = if (is1280) Color(0xFF00F076) else Color(0xFF7DA596),
                         maxLines = 1,
                         modifier = Modifier.padding(horizontal = if (isLandscape) 8.dp else 5.dp, vertical = 3.dp)
                     )

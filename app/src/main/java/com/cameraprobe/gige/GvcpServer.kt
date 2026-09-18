@@ -71,6 +71,19 @@ class GvcpServer(private val context: Context) {
     var onFocusChangedByMvs: ((Float?, Boolean) -> Unit)? = null
     var onExposureChangedByMvs: ((Long?, Boolean) -> Unit)? = null
     var onGainChangedByMvs: ((Int?, Boolean) -> Unit)? = null
+    var onResolutionChangedByMvs: ((Int, Int) -> Unit)? = null
+
+    fun getStreamWidth(): Int = readReg(0xA000).takeIf { it > 0 } ?: 640
+    fun getStreamHeight(): Int = readReg(0xA004).takeIf { it > 0 } ?: 480
+
+    fun updateResolution(w: Int, h: Int) {
+        writeReg(0xA000, w)
+        writeReg(0xA004, h)
+        writeReg(0xA020, w * h)
+        if (_isConnected.value) {
+            resetClientSession("Смена разрешения на ${w}x${h}")
+        }
+    }
 
     // Единое 128 КБ адресное пространство камеры (Bootstrap + URLs + Controls + XML)
     private val memory = ByteArray(128 * 1024)
@@ -516,6 +529,20 @@ class GvcpServer(private val context: Context) {
                 addLog("$destAddr:$targetPort", "STREAM_START", "Старт вещания GVSP: ${w}x${h}, pkt=$pktSize, delay=$delayTicks")
                 streamer.startStreaming(destAddr, targetPort, pktSize, w, h, fmt)
                 onStreamStart?.invoke()
+            } else if (addr == 0xA000) { // Width
+                val clamped = value.coerceIn(320, 4096)
+                writeReg(0xA000, clamped)
+                val h = readReg(0xA004).takeIf { it > 0 } ?: 480
+                writeReg(0xA020, clamped * h)
+                onResolutionChangedByMvs?.invoke(clamped, h)
+                addLog("$clientAddr:$clientPort", "SET_WIDTH", "Ширина кадра MVS: $clamped")
+            } else if (addr == 0xA004) { // Height
+                val clamped = value.coerceIn(240, 3072)
+                writeReg(0xA004, clamped)
+                val w = readReg(0xA000).takeIf { it > 0 } ?: 640
+                writeReg(0xA020, w * clamped)
+                onResolutionChangedByMvs?.invoke(w, clamped)
+                addLog("$clientAddr:$clientPort", "SET_HEIGHT", "Высота кадра MVS: $clamped")
             } else if (addr == 0xA014) { // AcquisitionStop
                 addLog("$clientAddr:$clientPort", "STREAM_STOP", "Остановка вещания GVSP")
                 streamer.stopStreaming()

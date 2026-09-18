@@ -151,6 +151,17 @@ class Camera2Session(private val context: Context) {
         streamRotationDegrees = deg
     }
 
+    // Целевое разрешение потока MVS (640x480 или 1280x960)
+    @Volatile var streamTargetWidth: Int = 640
+        private set
+    @Volatile var streamTargetHeight: Int = 480
+        private set
+
+    fun setStreamResolution(width: Int, height: Int) {
+        streamTargetWidth = width
+        streamTargetHeight = height
+    }
+
     // Характеристики открытой камеры
     var characteristics: CameraCharacteristics? = null
         private set
@@ -344,8 +355,8 @@ class Camera2Session(private val context: Context) {
                     val w = img.width
                     val h = img.height
 
-                    val targetW = 640
-                    val targetH = 480
+                    val targetW = streamTargetWidth
+                    val targetH = streamTargetHeight
                     val reqSize = targetW * targetH
                     if (reusableMonoBytes == null || reusableMonoBytes!!.size != reqSize) {
                         reusableMonoBytes = ByteArray(reqSize)
@@ -360,11 +371,11 @@ class Camera2Session(private val context: Context) {
 
                     if (isRefLandscape || isInvertedLandscape) {
                         // Альбомные режимы (телефон лежит на боку):
-                        // w = 1280, h = 960 -> targetW = 640, targetH = 480
-                        val maxStartX = (w - targetW).coerceAtLeast(0) // 1280 - 640 = 640
-                        val maxStartY = (h - targetH).coerceAtLeast(0) // 960 - 480 = 480
-                        val centerStartX = maxStartX / 2 // 320
-                        val centerStartY = maxStartY / 2 // 240
+                        // w = 1280, h = 960
+                        val maxStartX = (w - targetW).coerceAtLeast(0)
+                        val maxStartY = (h - targetH).coerceAtLeast(0)
+                        val centerStartX = maxStartX / 2
+                        val centerStartY = maxStartY / 2
 
                         val roiStartX = if (isInvertedLandscape) {
                             (centerStartX - (roiNormalizedX * (maxStartX / 2f)).toInt()).coerceIn(0, maxStartX)
@@ -403,7 +414,7 @@ class Camera2Session(private val context: Context) {
                                 }
                             }
                         } else {
-                            // FULL FOV режим (1280x960 -> 640x480)
+                            // FULL FOV режим
                             val scaleX = w.toFloat() / targetW
                             val scaleY = h.toFloat() / targetH
                             if (isInvertedLandscape) {
@@ -418,10 +429,11 @@ class Camera2Session(private val context: Context) {
                                 }
                             } else {
                                 for (r in 0 until targetH) {
-                                    val srcRowOffset = (r * 2) * rowStride
+                                    val srcRowOffset = (((r * scaleY).toInt()).coerceIn(0, h - 1)) * rowStride
                                     val dstRowOffset = r * targetW
                                     for (c in 0 until targetW) {
-                                        monoBytes[dstRowOffset + c] = yBuffer.get(srcRowOffset + (c * 2) * pixelStride)
+                                        val srcCol = (((c * scaleX).toInt()).coerceIn(0, w - 1)) * pixelStride
+                                        monoBytes[dstRowOffset + c] = yBuffer.get(srcRowOffset + srcCol)
                                     }
                                 }
                             }
