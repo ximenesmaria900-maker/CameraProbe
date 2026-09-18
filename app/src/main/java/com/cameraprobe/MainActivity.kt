@@ -180,35 +180,21 @@ private fun updateTextureTransform(
     val bufferHeight = 960f
     val viewRect = RectF(0f, 0f, viewWidth.toFloat(), viewHeight.toFloat())
 
+    // sensorOrientation=90 уже компенсируется SurfaceTexture внутри GL.
+    // Здесь компенсируем только поворот экрана (дисплея) относительно портрета.
+    // Итоговые углы: -90f→270°, 0f→0°, 90f→90°, 180f→180°
     when (rotationDeg) {
-        -90f -> {
-            // Телефон на левом боку (стенд). Сенсор 90° совпадает с горизонтальным видоискателем 4:3
-            val bufferRect = RectF(0f, 0f, bufferWidth, bufferHeight)
-            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
-            matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-            val scale = kotlin.math.max(viewWidth / bufferWidth, viewHeight / bufferHeight)
-            matrix.postScale(scale, scale, centerX, centerY)
-        }
         0f -> {
-            // Вертикальный портрет (телефон прямо). Буфер 1280x960 поворачивается на 90° по часовой стрелке.
-            val bufferRect = RectF(0f, 0f, bufferHeight, bufferWidth)
-            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
-            matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
-            val scale = kotlin.math.max(viewWidth / bufferHeight, viewHeight / bufferWidth)
-            matrix.postScale(scale, scale, centerX, centerY)
-            matrix.postRotate(90f, centerX, centerY)
-        }
-        90f -> {
-            // Телефон на правом боку (Landscape Right). Переворот на 180°.
+            // Портрет (телефон прямо) — без дополнительного поворота.
+            // Буфер после внутренней GL-компенсации уже соответствует 3:4.
             val bufferRect = RectF(0f, 0f, bufferWidth, bufferHeight)
             bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
             matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
             val scale = kotlin.math.max(viewWidth / bufferWidth, viewHeight / bufferHeight)
             matrix.postScale(scale, scale, centerX, centerY)
-            matrix.postRotate(180f, centerX, centerY)
         }
-        180f -> {
-            // Перевёрнутый вертикальный портрет.
+        -90f -> {
+            // Телефон на левом боку (стенд, ROTATION_270) — компенсация +270°
             val bufferRect = RectF(0f, 0f, bufferHeight, bufferWidth)
             bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
             matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
@@ -216,10 +202,28 @@ private fun updateTextureTransform(
             matrix.postScale(scale, scale, centerX, centerY)
             matrix.postRotate(270f, centerX, centerY)
         }
+        90f -> {
+            // Телефон на правом боку (ROTATION_90) — компенсация +90°
+            val bufferRect = RectF(0f, 0f, bufferHeight, bufferWidth)
+            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
+            matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
+            val scale = kotlin.math.max(viewWidth / bufferHeight, viewHeight / bufferWidth)
+            matrix.postScale(scale, scale, centerX, centerY)
+            matrix.postRotate(90f, centerX, centerY)
+        }
+        180f -> {
+            // Перевёрнутый портрет — компенсация 180°
+            val bufferRect = RectF(0f, 0f, bufferWidth, bufferHeight)
+            bufferRect.offset(centerX - bufferRect.centerX(), centerY - bufferRect.centerY())
+            matrix.setRectToRect(viewRect, bufferRect, Matrix.ScaleToFit.FILL)
+            val scale = kotlin.math.max(viewWidth / bufferWidth, viewHeight / bufferHeight)
+            matrix.postScale(scale, scale, centerX, centerY)
+            matrix.postRotate(180f, centerX, centerY)
+        }
         else -> {
             val scale = kotlin.math.max(viewWidth / bufferWidth, viewHeight / bufferHeight)
             matrix.postScale(scale, scale, centerX, centerY)
-            matrix.postRotate(rotationDeg + 90f, centerX, centerY)
+            matrix.postRotate(rotationDeg, centerX, centerY)
         }
     }
     textureView.setTransform(matrix)

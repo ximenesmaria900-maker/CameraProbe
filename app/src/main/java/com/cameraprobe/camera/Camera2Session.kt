@@ -353,8 +353,8 @@ class Camera2Session(private val context: Context) {
                     val monoBytes = reusableMonoBytes!!
                     yBuffer.rewind()
 
-                    val isRefLandscape = (streamRotationDegrees == -90f || streamRotationDegrees == 270f)
-                    val isInvertedLandscape = (streamRotationDegrees == 90f || streamRotationDegrees == -270f)
+                    val isRefLandscape = (streamRotationDegrees == 90f || streamRotationDegrees == -270f)
+                    val isInvertedLandscape = (streamRotationDegrees == -90f || streamRotationDegrees == 270f)
                     val isPortrait = (streamRotationDegrees == 0f)
                     val isInvertedPortrait = (streamRotationDegrees == 180f || streamRotationDegrees == -180f)
 
