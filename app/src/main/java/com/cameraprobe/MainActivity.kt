@@ -47,6 +47,7 @@ import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
+import android.os.Build
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -68,6 +69,17 @@ class MainActivity : ComponentActivity() {
     private val cameraSession by lazy { Camera2Session(this) }
     private val gvcpServer by lazy { GvcpServer(this) }
 
+    private var displayRotationState = mutableStateOf(Surface.ROTATION_0)
+
+    private fun updateDisplayRotation() {
+        displayRotationState.value = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            display?.rotation ?: Surface.ROTATION_0
+        } else {
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.rotation
+        }
+    }
+
     private val permissionLauncher = registerForActivityResult(
         ActivityResultContracts.RequestMultiplePermissions()
     ) { results ->
@@ -83,8 +95,15 @@ class MainActivity : ComponentActivity() {
         controller.hide(WindowInsetsCompat.Type.systemBars())
     }
 
+    override fun onConfigurationChanged(newConfig: android.content.res.Configuration) {
+        super.onConfigurationChanged(newConfig)
+        updateDisplayRotation()
+        hideSystemUI()
+    }
+
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        updateDisplayRotation()
 
         // Экран всегда включён + скрыть системные панели (Immersive Fullscreen)
         window.addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON)
@@ -131,6 +150,7 @@ class MainActivity : ComponentActivity() {
                     CameraAppScreen(
                         session = cameraSession,
                         gvcpServer = gvcpServer,
+                        displayRotation = displayRotationState.value,
                         onRequestPermissions = {
                             permissionLauncher.launch(
                                 arrayOf(
@@ -147,6 +167,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onResume() {
         super.onResume()
+        updateDisplayRotation()
         hideSystemUI()
     }
 
@@ -233,6 +254,7 @@ private fun updateTextureTransform(
 fun CameraAppScreen(
     session: Camera2Session,
     gvcpServer: GvcpServer,
+    displayRotation: Int,
     onRequestPermissions: () -> Unit
 ) {
     val context = LocalContext.current
@@ -251,8 +273,14 @@ fun CameraAppScreen(
     val configuration = LocalConfiguration.current
     val isLandscape = configuration.orientation == Configuration.ORIENTATION_LANDSCAPE
 
-    // Режим работы: блокировка ориентации стенда (по умолчанию АВТО)
-    var isStandModeLocked by remember { mutableStateOf(false) }
+    // Синхронизация ориентации строго с дисплеем окна (исключает визуальные артефакты и черные области при повороте)
+    val autoAngle = when (displayRotation) {
+        Surface.ROTATION_0 -> 0f
+        Surface.ROTATION_90 -> -90f
+        Surface.ROTATION_180 -> 180f
+        Surface.ROTATION_270 -> 90f
+        else -> 0f
+    }
 
     // Камеры, масштаб, режим сенсора
     var availableCameras by remember { mutableStateOf<List<CameraDeviceInfo>>(emptyList()) }
@@ -260,57 +288,20 @@ fun CameraAppScreen(
     var selectedFps by remember { mutableStateOf(30) }
     var currentZoom by remember { mutableStateOf(1.0f) }
     var cropMode by remember { mutableStateOf(Camera2Session.SensorCropMode.SENSOR_ROI) }
-    var rotationAngle by remember { mutableStateOf(if (isLandscape) -90f else 0f) }
+    var rotationAngle by remember { mutableStateOf(autoAngle) }
     var roiNormX by remember { mutableStateOf(0f) }
     var roiNormY by remember { mutableStateOf(0f) }
     var textureViewRef by remember { mutableStateOf<TextureView?>(null) }
 
-    LaunchedEffect(isLandscape) {
-        if (!isStandModeLocked) {
-            val targetAngle = if (isLandscape) -90f else 0f
-            if (rotationAngle != targetAngle) {
-                rotationAngle = targetAngle
-                session.setStreamRotation(targetAngle)
-                textureViewRef?.let { tv ->
-                    if (tv.width > 0 && tv.height > 0) {
-                        updateTextureTransform(tv, tv.width, tv.height, targetAngle)
-                    }
+    LaunchedEffect(autoAngle) {
+        if (rotationAngle != autoAngle) {
+            rotationAngle = autoAngle
+            session.setStreamRotation(autoAngle)
+            textureViewRef?.let { tv ->
+                if (tv.width > 0 && tv.height > 0) {
+                    updateTextureTransform(tv, tv.width, tv.height, autoAngle)
                 }
             }
-        }
-    }
-
-    DisposableEffect(context, isStandModeLocked) {
-        val orientationListener = object : OrientationEventListener(context, SensorManager.SENSOR_DELAY_UI) {
-            override fun onOrientationChanged(orientation: Int) {
-                if (orientation == ORIENTATION_UNKNOWN || isStandModeLocked) return
-                // При разблокированном режиме АВТО камера автоматически согласует угол потока и видоискателя:
-                // 225..314: телефон на левом боку (стенд, -90f)
-                // 315..44: вертикальный портрет (0f)
-                // 45..134: телефон на правом боку (90f)
-                // 135..224: перевернутый портрет (180f)
-                val newAngle = when {
-                    orientation in 225..314 -> -90f
-                    orientation in 45..134 -> 90f
-                    orientation in 135..224 -> 180f
-                    else -> 0f
-                }
-                if (newAngle != rotationAngle) {
-                    rotationAngle = newAngle
-                    session.setStreamRotation(newAngle)
-                    textureViewRef?.let { tv ->
-                        if (tv.width > 0 && tv.height > 0) {
-                            updateTextureTransform(tv, tv.width, tv.height, newAngle)
-                        }
-                    }
-                }
-            }
-        }
-        if (orientationListener.canDetectOrientation()) {
-            orientationListener.enable()
-        }
-        onDispose {
-            orientationListener.disable()
         }
     }
 
@@ -438,10 +429,9 @@ fun CameraAppScreen(
         // --- 2. Центр: Полноразмерное живое превью с рамкой ROI и лазерным сечением ---
         Box(
             modifier = Modifier.fillMaxSize(),
-            contentAlignment = Alignment.Center
+            contentAlignment = if (isLandscape) Alignment.Center else Alignment.TopCenter
         ) {
             val isRotated90 = (kotlin.math.abs(rotationAngle) == 90f || kotlin.math.abs(rotationAngle) == 270f)
-            val previewAspectRatio = 4f / 3f
 
             BoxWithConstraints(
                 modifier = (if (isLandscape) {
@@ -450,8 +440,9 @@ fun CameraAppScreen(
                         .aspectRatio(4f / 3f, matchHeightConstraintsFirst = true)
                 } else {
                     Modifier
-                        .fillMaxWidth(0.94f)
-                        .aspectRatio(3f / 4f, matchHeightConstraintsFirst = false)
+                        .padding(top = 48.dp)
+                        .fillMaxWidth(0.96f)
+                        .aspectRatio(4f / 3f, matchHeightConstraintsFirst = false)
                 })
                     .background(Color(0xFF060D0A))
                     .pointerInput(Unit) {
@@ -474,16 +465,9 @@ fun CameraAppScreen(
                                 activePopup = null
                                 val boxWpx = size.width.toFloat()
                                 val boxHpx = size.height.toFloat()
-                                val isLandscapeMode = (rotationAngle == -90f || rotationAngle == 90f)
-                                val scale = if (isLandscapeMode) {
-                                    kotlin.math.max(boxWpx / 960f, boxHpx / 1280f)
-                                } else {
-                                    boxWpx / 1280f
-                                }
-                                val roiWpx = 640f * scale
-                                val roiHpx = 480f * scale
-                                val maxTravelX = (if (isLandscapeMode) (1280f - 640f) * scale else (960f - 640f) * scale).coerceAtLeast(1f)
-                                val maxTravelY = (if (isLandscapeMode) (960f - 480f) * scale else (1280f - 480f) * scale).coerceAtLeast(1f)
+                                val scale = kotlin.math.max(boxWpx / 1280f, boxHpx / 960f)
+                                val maxTravelX = ((1280f - 640f) * scale).coerceAtLeast(1f)
+                                val maxTravelY = ((960f - 480f) * scale).coerceAtLeast(1f)
                                 val deltaNormX = dragAmount.x / (maxTravelX / 2f)
                                 val deltaNormY = dragAmount.y / (maxTravelY / 2f)
                                 roiNormX = (roiNormX + deltaNormX).coerceIn(-1.0f, 1.0f)
@@ -499,16 +483,11 @@ fun CameraAppScreen(
                 val boxWpx = with(density) { boxW.toPx() }
                 val boxHpx = with(density) { boxH.toPx() }
 
-                val isLandscapeMode = (rotationAngle == -90f || rotationAngle == 90f)
-                val scale = if (isLandscapeMode) {
-                    kotlin.math.max(boxWpx / 960f, boxHpx / 1280f)
-                } else {
-                    boxWpx / 1280f
-                }
+                val scale = kotlin.math.max(boxWpx / 1280f, boxHpx / 960f)
                 val roiWpx = 640f * scale
                 val roiHpx = 480f * scale
-                val maxTravelX = (if (isLandscapeMode) (1280f - 640f) * scale else (960f - 640f) * scale).coerceAtLeast(0f)
-                val maxTravelY = (if (isLandscapeMode) (960f - 480f) * scale else (1280f - 480f) * scale).coerceAtLeast(0f)
+                val maxTravelX = ((1280f - 640f) * scale).coerceAtLeast(0f)
+                val maxTravelY = ((960f - 480f) * scale).coerceAtLeast(0f)
                 val roiLeftPx = (boxWpx / 2f) - (roiWpx / 2f) + (roiNormX * (maxTravelX / 2f))
                 val roiTopPx = (boxHpx / 2f) - (roiHpx / 2f) + (roiNormY * (maxTravelY / 2f))
 
@@ -615,8 +594,8 @@ fun CameraAppScreen(
                 .fillMaxWidth()
                 .align(Alignment.TopCenter)
                 .padding(
-                    start = if (isLandscape) 54.dp else 12.dp,
-                    end = if (isLandscape) 44.dp else 12.dp,
+                    start = if (isLandscape) 54.dp else 8.dp,
+                    end = if (isLandscape) 44.dp else 8.dp,
                     top = 8.dp
                 ),
             horizontalArrangement = Arrangement.SpaceBetween,
@@ -625,7 +604,7 @@ fun CameraAppScreen(
             // Левая группа: Статус LED, IP:порт, Формат
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
+                horizontalArrangement = Arrangement.spacedBy(if (isLandscape) 8.dp else 4.dp)
             ) {
                 // Светящийся индикатор подключения
                 Box(
@@ -651,7 +630,8 @@ fun CameraAppScreen(
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                         color = Color(0xFF55E6A5),
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = if (isLandscape) 8.dp else 5.dp, vertical = 3.dp)
                     )
                 }
 
@@ -661,11 +641,12 @@ fun CameraAppScreen(
                     border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF173327))
                 ) {
                     Text(
-                        "640×480 Mono8",
+                        if (isLandscape) "640×480 Mono8" else "640×480",
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                         color = Color(0xFF7DA596),
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = if (isLandscape) 8.dp else 5.dp, vertical = 3.dp)
                     )
                 }
             }
@@ -673,39 +654,8 @@ fun CameraAppScreen(
             // Правая группа: Режим стенда/авто, Поворот кадра, Стоп, Сброс
             Row(
                 verticalAlignment = Alignment.CenterVertically,
-                horizontalArrangement = Arrangement.spacedBy(6.dp)
+                horizontalArrangement = Arrangement.spacedBy(if (isLandscape) 6.dp else 4.dp)
             ) {
-                // Переключатель режима ориентации: СТЕНД (жёсткая фиксация) / АВТО (по датчику)
-                Surface(
-                    shape = RoundedCornerShape(6.dp),
-                    color = if (isStandModeLocked) Color(0xFF0D281E) else Color(0xFF0C1814),
-                    border = androidx.compose.foundation.BorderStroke(
-                        1.dp,
-                        if (isStandModeLocked) Color(0xFF00F076) else Color(0xFF19382C)
-                    ),
-                    modifier = Modifier.clickable {
-                        isStandModeLocked = !isStandModeLocked
-                        if (isStandModeLocked) {
-                            rotationAngle = -90f
-                            session.setStreamRotation(-90f)
-                            textureViewRef?.let { tv ->
-                                if (tv.width > 0 && tv.height > 0) {
-                                    updateTextureTransform(tv, tv.width, tv.height, -90f)
-                                }
-                            }
-                        }
-                    }
-                ) {
-                    Text(
-                        if (isStandModeLocked) "🔒 СТЕНД" else "🔓 АВТО",
-                        fontSize = 10.sp,
-                        fontFamily = FontFamily.Monospace,
-                        fontWeight = FontWeight.Bold,
-                        color = if (isStandModeLocked) Color(0xFF00F076) else Color(0xFFE1E7E4),
-                        modifier = Modifier.padding(horizontal = 7.dp, vertical = 3.dp)
-                    )
-                }
-
                 // Кнопка поворота кадра (согласована с MVS)
                 Surface(
                     shape = RoundedCornerShape(6.dp),
@@ -739,7 +689,8 @@ fun CameraAppScreen(
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF55E6A5),
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = if (isLandscape) 8.dp else 5.dp, vertical = 3.dp)
                     )
                 }
 
@@ -752,7 +703,7 @@ fun CameraAppScreen(
                     }
                 ) {
                     Row(
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp),
+                        modifier = Modifier.padding(horizontal = if (isLandscape) 8.dp else 5.dp, vertical = 3.dp),
                         verticalAlignment = Alignment.CenterVertically,
                         horizontalArrangement = Arrangement.spacedBy(4.dp)
                     ) {
@@ -765,7 +716,8 @@ fun CameraAppScreen(
                         Text(
                             if (isGvcpRunning) "Стоп" else "Старт",
                             fontSize = 10.sp,
-                            color = Color(0xFFE1E7E4)
+                            color = Color(0xFFE1E7E4),
+                            maxLines = 1
                         )
                     }
                 }
@@ -777,12 +729,11 @@ fun CameraAppScreen(
                     modifier = Modifier.clickable {
                         roiNormX = 0f
                         roiNormY = 0f
-                        rotationAngle = -90f
-                        isStandModeLocked = true
-                        session.setStreamRotation(-90f)
+                        rotationAngle = autoAngle
+                        session.setStreamRotation(autoAngle)
                         textureViewRef?.let { tv ->
                             if (tv.width > 0 && tv.height > 0) {
-                                updateTextureTransform(tv, tv.width, tv.height, -90f)
+                                updateTextureTransform(tv, tv.width, tv.height, autoAngle)
                             }
                         }
                         session.setRoiOffset(0f, 0f)
@@ -794,7 +745,8 @@ fun CameraAppScreen(
                         "Сброс",
                         fontSize = 10.sp,
                         color = Color(0xFFE1E7E4),
-                        modifier = Modifier.padding(horizontal = 8.dp, vertical = 3.dp)
+                        maxLines = 1,
+                        modifier = Modifier.padding(horizontal = if (isLandscape) 8.dp else 5.dp, vertical = 3.dp)
                     )
                 }
             }
@@ -900,7 +852,13 @@ fun CameraAppScreen(
                         Text("МАСШТАБ", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF5E8276))
                         Text("${currentZoom.toInt()}x", fontSize = 8.sp, fontWeight = FontWeight.Bold, color = Color(0xFF00F076))
                     }
-                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "Цифровой кроп видоискателя",
+                        fontSize = 7.sp,
+                        color = Color(0xFF7DA596),
+                        modifier = Modifier.padding(vertical = 1.dp)
+                    )
+                    Spacer(Modifier.height(3.dp))
                     Row(
                         modifier = Modifier.fillMaxWidth(),
                         horizontalArrangement = Arrangement.spacedBy(3.dp)
@@ -917,14 +875,24 @@ fun CameraAppScreen(
                                     session.setZoom(z)
                                 }
                             ) {
-                                Text(
-                                    "${z.toInt()}x",
-                                    fontSize = 9.sp,
-                                    fontWeight = FontWeight.Bold,
-                                    color = if (isSel) Color.Black else Color(0xFF7DA596),
-                                    textAlign = TextAlign.Center,
-                                    modifier = Modifier.padding(vertical = 4.dp)
-                                )
+                                Column(
+                                    modifier = Modifier.padding(vertical = 3.dp),
+                                    horizontalAlignment = Alignment.CenterHorizontally
+                                ) {
+                                    Text(
+                                        "${z.toInt()}x",
+                                        fontSize = 9.sp,
+                                        fontWeight = FontWeight.Bold,
+                                        color = if (isSel) Color.Black else Color(0xFF7DA596),
+                                        textAlign = TextAlign.Center
+                                    )
+                                    Text(
+                                        "ZOOM",
+                                        fontSize = 7.sp,
+                                        color = if (isSel) Color(0xFF071B12) else Color(0xFF5E8276),
+                                        textAlign = TextAlign.Center
+                                    )
+                                }
                             }
                         }
                     }
@@ -942,17 +910,6 @@ fun CameraAppScreen(
                 CameraCardContent()
                 ZoomCardContent()
             }
-        } else {
-            Row(
-                modifier = Modifier
-                    .align(Alignment.BottomCenter)
-                    .padding(start = 12.dp, end = 12.dp, bottom = 96.dp)
-                    .fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(8.dp)
-            ) {
-                Box(Modifier.weight(1f)) { CameraCardContent() }
-                Box(Modifier.weight(1f)) { ZoomCardContent() }
-            }
         }
 
         // --- 5. Всплывающая карточка параметров (Floating Settings Pop-up) ---
@@ -961,7 +918,7 @@ fun CameraAppScreen(
             Box(
                 modifier = Modifier
                     .align(Alignment.BottomCenter)
-                    .padding(bottom = if (isLandscape) 54.dp else 186.dp)
+                    .padding(bottom = if (isLandscape) 54.dp else 168.dp)
                     .then(if (isLandscape) Modifier.width(380.dp) else Modifier.fillMaxWidth(0.92f))
             ) {
                 Surface(
@@ -1390,64 +1347,74 @@ fun CameraAppScreen(
 
         // --- 6. Нижняя панель управления (Bottom Control Dock) ---
         @Composable
-        fun RoiFovToggle() {
+        fun RoiFovToggle(modifier: Modifier = Modifier) {
             val isRoi = cropMode == Camera2Session.SensorCropMode.SENSOR_ROI
             Surface(
                 shape = RoundedCornerShape(8.dp),
                 color = Color(0xFF081410),
                 border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF173327)),
-                modifier = Modifier.height(34.dp)
+                modifier = modifier.height(34.dp)
             ) {
                 Row(
-                    modifier = Modifier.padding(2.dp),
+                    modifier = Modifier
+                        .padding(2.dp)
+                        .then(if (isLandscape) Modifier else Modifier.fillMaxWidth()),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Surface(
                         shape = RoundedCornerShape(6.dp),
                         color = if (isRoi) Color(0xFF00F076) else Color.Transparent,
-                        modifier = Modifier.clickable {
-                            cropMode = Camera2Session.SensorCropMode.SENSOR_ROI
-                            session.setCropMode(cropMode)
-                        }
+                        modifier = (if (isLandscape) Modifier else Modifier.weight(1f))
+                            .fillMaxHeight()
+                            .clickable {
+                                cropMode = Camera2Session.SensorCropMode.SENSOR_ROI
+                                session.setCropMode(cropMode)
+                            }
                     ) {
-                        Text(
-                            "1:1 ROI",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (isRoi) Color.Black else Color(0xFF7DA596),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp)
-                        )
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 6.dp)) {
+                            Text(
+                                "1:1 ROI",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (isRoi) Color.Black else Color(0xFF7DA596),
+                                textAlign = TextAlign.Center,
+                                maxLines = 1
+                            )
+                        }
                     }
 
                     Surface(
                         shape = RoundedCornerShape(6.dp),
                         color = if (!isRoi) Color(0xFF00F076) else Color.Transparent,
-                        modifier = Modifier.clickable {
-                            cropMode = Camera2Session.SensorCropMode.FULL_FOV
-                            session.setCropMode(cropMode)
-                        }
+                        modifier = (if (isLandscape) Modifier else Modifier.weight(1f))
+                            .fillMaxHeight()
+                            .clickable {
+                                cropMode = Camera2Session.SensorCropMode.FULL_FOV
+                                session.setCropMode(cropMode)
+                            }
                     ) {
-                        Text(
-                            "FULL FOV",
-                            fontSize = 10.sp,
-                            fontWeight = FontWeight.Bold,
-                            color = if (!isRoi) Color.Black else Color(0xFF7DA596),
-                            textAlign = TextAlign.Center,
-                            modifier = Modifier.padding(horizontal = 6.dp, vertical = 5.dp)
-                        )
+                        Box(contentAlignment = Alignment.Center, modifier = Modifier.padding(horizontal = 6.dp)) {
+                            Text(
+                                "FULL FOV",
+                                fontSize = 10.sp,
+                                fontWeight = FontWeight.Bold,
+                                color = if (!isRoi) Color.Black else Color(0xFF7DA596),
+                                textAlign = TextAlign.Center,
+                                maxLines = 1
+                            )
+                        }
                     }
                 }
             }
         }
 
         @Composable
-        fun CenterButton() {
+        fun CenterButton(modifier: Modifier = Modifier) {
             Surface(
                 shape = RoundedCornerShape(8.dp),
                 color = Color(0xFF081410),
                 border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFFFCD34D)),
-                modifier = Modifier
+                modifier = modifier
                     .height(34.dp)
                     .clickable {
                         roiNormX = 0f
@@ -1455,99 +1422,123 @@ fun CameraAppScreen(
                         session.setRoiOffset(0f, 0f)
                     }
             ) {
-                Box(Modifier.padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = (if (!isLandscape) Modifier.fillMaxWidth() else Modifier)
+                        .padding(horizontal = 8.dp)
+                        .fillMaxHeight(),
+                    contentAlignment = Alignment.Center
+                ) {
                     Text(
                         "⌖ ЦЕНТР",
                         fontSize = 10.sp,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFFFCD34D)
+                        color = Color(0xFFFCD34D),
+                        maxLines = 1
                     )
                 }
             }
         }
 
         @Composable
-        fun FocusButton() {
+        fun FocusButton(modifier: Modifier = Modifier) {
             val isFocusOpen = activePopup == ActivePopup.FOCUS
             Surface(
                 shape = RoundedCornerShape(8.dp),
                 color = Color(0xFF081410),
                 border = androidx.compose.foundation.BorderStroke(1.dp, if (isFocusOpen) Color(0xFF00F076) else Color(0xFF173327)),
-                modifier = Modifier
+                modifier = modifier
                     .height(34.dp)
                     .clickable {
                         activePopup = if (isFocusOpen) null else ActivePopup.FOCUS
                     }
             ) {
-                Box(Modifier.padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = (if (!isLandscape) Modifier.fillMaxWidth() else Modifier)
+                        .padding(horizontal = 8.dp)
+                        .fillMaxHeight(),
+                    contentAlignment = Alignment.Center
+                ) {
                     Text(
                         if (isAutoAF) "AF АВТО" else "%.2f dpt".format(focusDiopters),
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
-                        color = if (isFocusOpen) Color(0xFF00F076) else Color(0xFFE1E7E4)
+                        color = if (isFocusOpen) Color(0xFF00F076) else Color(0xFFE1E7E4),
+                        maxLines = 1
                     )
                 }
             }
         }
 
         @Composable
-        fun ExpButton() {
+        fun ExpButton(modifier: Modifier = Modifier) {
             val isExpOpen = activePopup == ActivePopup.EXPOSURE
             Surface(
                 shape = RoundedCornerShape(8.dp),
                 color = Color(0xFF081410),
                 border = androidx.compose.foundation.BorderStroke(1.dp, if (isExpOpen) Color(0xFF00F076) else Color(0xFF173327)),
-                modifier = Modifier
+                modifier = modifier
                     .height(34.dp)
                     .clickable {
                         activePopup = if (isExpOpen) null else ActivePopup.EXPOSURE
                     }
             ) {
-                Box(Modifier.padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = (if (!isLandscape) Modifier.fillMaxWidth() else Modifier)
+                        .padding(horizontal = 8.dp)
+                        .fillMaxHeight(),
+                    contentAlignment = Alignment.Center
+                ) {
                     Text(
                         if (isAutoExposure) "EXP АВТО" else "%.1f ms".format(exposureUs / 1000f),
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFF00F076)
+                        color = Color(0xFF00F076),
+                        maxLines = 1
                     )
                 }
             }
         }
 
         @Composable
-        fun GainButton() {
+        fun GainButton(modifier: Modifier = Modifier) {
             val isGainOpen = activePopup == ActivePopup.GAIN
             Surface(
                 shape = RoundedCornerShape(8.dp),
                 color = Color(0xFF081410),
                 border = androidx.compose.foundation.BorderStroke(1.dp, if (isGainOpen) Color(0xFF00F076) else Color(0xFF173327)),
-                modifier = Modifier
+                modifier = modifier
                     .height(34.dp)
                     .clickable {
                         activePopup = if (isGainOpen) null else ActivePopup.GAIN
                     }
             ) {
-                Box(Modifier.padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = (if (!isLandscape) Modifier.fillMaxWidth() else Modifier)
+                        .padding(horizontal = 8.dp)
+                        .fillMaxHeight(),
+                    contentAlignment = Alignment.Center
+                ) {
                     Text(
                         if (isAutoGain) "ISO АВТО" else "ISO $gainIso",
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
-                        color = if (isGainOpen) Color(0xFF00F076) else Color(0xFFE1E7E4)
+                        color = if (isGainOpen) Color(0xFF00F076) else Color(0xFFE1E7E4),
+                        maxLines = 1
                     )
                 }
             }
         }
 
         @Composable
-        fun FpsButton() {
+        fun FpsButton(modifier: Modifier = Modifier) {
             Surface(
                 shape = RoundedCornerShape(8.dp),
                 color = Color(0xFF081410),
                 border = androidx.compose.foundation.BorderStroke(1.dp, Color(0xFF173327)),
-                modifier = Modifier
+                modifier = modifier
                     .height(34.dp)
                     .clickable {
                         val nextFps = if (selectedFps == 30) 20 else 30
@@ -1555,13 +1546,19 @@ fun CameraAppScreen(
                         session.setTargetFps(nextFps)
                     }
             ) {
-                Box(Modifier.padding(horizontal = 8.dp), contentAlignment = Alignment.Center) {
+                Box(
+                    modifier = (if (!isLandscape) Modifier.fillMaxWidth() else Modifier)
+                        .padding(horizontal = 8.dp)
+                        .fillMaxHeight(),
+                    contentAlignment = Alignment.Center
+                ) {
                     Text(
                         if (streamFps > 0) "$streamFps FPS" else "$selectedFps FPS",
                         fontSize = 10.sp,
                         fontFamily = FontFamily.Monospace,
                         fontWeight = FontWeight.Bold,
-                        color = Color(0xFFE1E7E4)
+                        color = Color(0xFFE1E7E4),
+                        maxLines = 1
                     )
                 }
             }
@@ -1591,50 +1588,47 @@ fun CameraAppScreen(
                 Spacer(Modifier.width(8.dp))
                 FpsButton()
             }
-            Text(
-                "Перетаскивайте элементы и углы ROI",
-                fontSize = 9.sp,
-                color = Color(0xFF5E8276),
-                modifier = Modifier
-                    .align(Alignment.BottomEnd)
-                    .padding(end = 44.dp, bottom = 12.dp)
-            )
         } else {
             Column(
                 modifier = Modifier
                     .fillMaxWidth()
                     .align(Alignment.BottomCenter)
-                    .padding(start = 10.dp, end = 10.dp, bottom = 6.dp),
+                    .padding(horizontal = 10.dp, vertical = 10.dp),
                 horizontalAlignment = Alignment.CenterHorizontally,
-                verticalArrangement = Arrangement.spacedBy(5.dp)
+                verticalArrangement = Arrangement.spacedBy(6.dp)
             ) {
+                // Строка 1: Карточки КАМЕРА и МАСШТАБ
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp)
+                ) {
+                    Box(Modifier.weight(1f)) { CameraCardContent() }
+                    Box(Modifier.weight(1f)) { ZoomCardContent() }
+                }
+
+                // Строка 2: Переключатель 1:1 ROI / FULL FOV + (если смещён: ЦЕНТР) + FPS
+                Row(
+                    modifier = Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(Modifier.weight(1.3f)) { RoiFovToggle() }
+                    RoiFovToggle(Modifier.weight(1.3f))
                     if (cropMode == Camera2Session.SensorCropMode.SENSOR_ROI && (roiNormX != 0f || roiNormY != 0f)) {
-                        Box(Modifier.weight(1f)) { CenterButton() }
+                        CenterButton(Modifier.weight(0.9f))
                     }
-                    Box(Modifier.weight(1f)) { FpsButton() }
+                    FpsButton(Modifier.weight(1f))
                 }
+
+                // Строка 3: Параметры съемки AF АВТО / EXP АВТО / ISO АВТО
                 Row(
                     modifier = Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(5.dp),
+                    horizontalArrangement = Arrangement.spacedBy(6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    Box(Modifier.weight(1f)) { FocusButton() }
-                    Box(Modifier.weight(1f)) { ExpButton() }
-                    Box(Modifier.weight(1f)) { GainButton() }
+                    FocusButton(Modifier.weight(1f))
+                    ExpButton(Modifier.weight(1f))
+                    GainButton(Modifier.weight(1f))
                 }
-                Text(
-                    "Перетаскивайте элементы и углы ROI",
-                    fontSize = 8.sp,
-                    color = Color(0xFF5E8276),
-                    textAlign = TextAlign.Center,
-                    modifier = Modifier.fillMaxWidth().padding(top = 1.dp)
-                )
             }
         }
     }
